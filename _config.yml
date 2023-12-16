@@ -111,7 +111,7 @@ pwa:
 paginate: 10
 
 # The base URL of your site
-baseurl: ""
+baseurl: "https://0xshade.github.io/0xshade-Writeups/"
 
 # ------------ The following options are not recommended to be modified ------------------
 
