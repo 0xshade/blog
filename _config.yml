@@ -18,11 +18,11 @@ title: 0xshade Blog # the main title
 
 tagline: Writeups & Research. # it will display as the sub-title
 
-##description: >- # used by seo meta and the atom feed 
+description: >- # used by seo meta and the atom feed 
 
 # Fill in the protocol & hostname for your site.
 # e.g. 'https://username.github.io', note that it does not end with a '/'.
-url: ""
+url: "https://0xshade.github.io"
 
 github:
   username: 0xshade # change to your github username
@@ -34,7 +34,7 @@ social:
   # Change to your full name.
   # It will be displayed as the default author of the posts and the copyright owner in the Footer
   name: 0xshade
-  #email: example@domain.com # change to your email address
+  email: example@domain.com # change to your email address
   links:
     # The first element serves as the copyright owner's link
  #   - https://twitter.com/username # change to your twitter homepage
