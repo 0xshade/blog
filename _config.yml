@@ -14,42 +14,38 @@ timezone: Asia/Dubai
 # jekyll-seo-tag settings › https://github.com/jekyll/jekyll-seo-tag/blob/master/docs/usage.md
 # ↓ --------------------------
 
-title: 0xshade Blog # the main title
+title: Shade's Blog # the main title
 
 tagline: Writeups & Research. # it will display as the sub-title
 
-description: >- # used by seo meta and the atom feed 
+description: >- # used by seo meta and the atom feed
 
 # Fill in the protocol & hostname for your site.
 # e.g. 'https://username.github.io', note that it does not end with a '/'.
-url: "https://0xshade.github.io"
+url: "https://blog.0xshade.sh"
 
 github:
-  username: 0xshade # change to your github username
+  username: 0xshade
 
-#twitter:
-#  username: N/A # change to your twitter username
+twitter:
+  username: xThatShade
 
 social:
-  # Change to your full name.
-  # It will be displayed as the default author of the posts and the copyright owner in the Footer
   name: 0xshade
-  email: example@domain.com # change to your email address
+  #email:  # change to your email address
   links:
     # The first element serves as the copyright owner's link
- #   - https://twitter.com/username # change to your twitter homepage
-    - https://github.com/0xshade # change to your github homepage
-    # Uncomment below to add more social links
-    # - https://www.facebook.com/username
-    # - https://www.linkedin.com/in/username
+    - https://twitter.com/xThatShade
+    - https://github.com/0xshade
+    - https://www.linkedin.com/in/sultan-murad
 
 #google_site_verification: # fill in to your verification string
 
 # ↑ --------------------------
 # The end of `jekyll-seo-tag` settings
 
-#google_analytics:
-#  id: # fill in your Google Analytics ID
+google_analytics:
+ id: G-S73C2FKK0V
 
 # Prefer color scheme setting.
 #
@@ -72,7 +68,7 @@ theme_mode: dark
 img_cdn:
 
 # the avatar on sidebar, support local or CORS resources
-avatar:
+avatar: assets/img/avatar.png
 
 # boolean type, the global switch for TOC in posts.
 toc: true
